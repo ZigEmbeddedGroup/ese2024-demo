@@ -1,0 +1,17 @@
+.{
+    .name = "ese24-microzig-demo",
+    .version = "0.1.0",
+    .dependencies = .{
+        .@"microzig/build" = .{
+            .path = "./microzig/build",
+        },
+        .@"microzig/bsp/raspberrypi/rp2040" = .{
+            .path = "./microzig/bsp/raspberrypi/rp2040",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
