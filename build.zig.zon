@@ -8,6 +8,9 @@
         .@"microzig/bsp/raspberrypi/rp2040" = .{
             .path = "./microzig/bsp/raspberrypi/rp2040",
         },
+        .mdf = .{
+            .path = "./microzig-driver-framework",
+        },
     },
     .paths = .{
         "build.zig",

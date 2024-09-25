@@ -1,5 +1,5 @@
 build:
-    zig build
+    zig build -freference-trace --prominent-compile-errors
 
 disasm: build
     llvm-objdump -S zig-out/firmware/ese24-demo.elf | tee zig-out/firmware/ese24-demo.dump
