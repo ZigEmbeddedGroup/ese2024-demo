@@ -1,12 +1,11 @@
-
 build:
-    zig build -Doptimize=ReleaseSmall
+    zig build
 
 disasm: build
     llvm-objdump -S zig-out/firmware/ese24-demo.elf | tee zig-out/firmware/ese24-demo.dump
 
 load: build
-    picotool load zig-out/firmware/ese24-demo.uf2
+    picotool load -uvx zig-out/firmware/ese24-demo.uf2
 
 ocd:
     openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -s tcl
