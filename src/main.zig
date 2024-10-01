@@ -94,6 +94,8 @@ const DebouncedButton = drivers.input.debounced_button.DebouncedButton_Generic(D
 /// The splash bitmap we show before pressing the first button:
 const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
 
+var framebuffer = drivers.display.ssd1306.Framebuffer.init_black();
+
 pub fn main() !void {
     const pins = pin_config.apply();
 
@@ -114,9 +116,13 @@ pub fn main() !void {
 
     rp2040.uart.init_logger(uart);
 
+    std.log.info("set up i2c...", .{});
+
     try i2c.apply(.{
         .clock_config = rp2040.clock_config,
     });
+
+    std.log.info("set up rotary encoder...", .{});
 
     var input_button = try DebouncedButton.init(Digital_IO{
         .pin = enc_button,
@@ -128,37 +134,60 @@ pub fn main() !void {
         .high,
     );
 
+    std.log.info("set up display...", .{});
+
     var display = try SSD1306.init(I2C_Device{
         .address = rp2040.i2c.Address.new(0b011_1100),
     });
 
-    try display.set_memory_addressing_mode(.horizontal);
-    try display.set_column_address(0, 127);
-    try display.set_page_address(0, 7);
+    try display.write_full_display(splash_bitmap_data);
 
-    try display.write_gdram(splash_bitmap_data);
+    std.log.info("wait for button press...", .{});
 
     // wait for user to press the button:
     while (try input_button.poll() != .pressed) {
         //
     }
 
-    try display.clear_screen(true);
+    try display.write_full_display(framebuffer.bit_stream());
+
+    // wait for user to release the button:
+    while (try input_button.poll() != .released) {
+        //
+    }
+
+    std.log.info("start application loop.", .{});
+
+    var level: u7 = 64;
+
+    try paint_gauge(&display, level);
 
     while (true) {
         const rot_event = try encoder.poll();
         switch (rot_event) {
             .idle => {},
-            .increment => std.log.info("inc", .{}),
-            .decrement => std.log.info("dec", .{}),
+            .increment => {
+                level +|= 1;
+                std.log.info("encoder: increment to {}", .{level});
+                try paint_gauge(&display, level);
+            },
+            .decrement => {
+                level -|= 1;
+                std.log.info("encoder: decrement to {}", .{level});
+                try paint_gauge(&display, level);
+            },
             .@"error" => {},
         }
 
         const btn_event = try input_button.poll();
         switch (btn_event) {
             .idle => {},
-            .pressed => std.log.info("press", .{}),
-            .released => std.log.info("release", .{}),
+            .pressed => {
+                level = 64;
+                std.log.info("button: reset to {}", .{level});
+                try paint_gauge(&display, level);
+            },
+            .released => {},
         }
     }
 
@@ -170,4 +199,15 @@ pub fn main() !void {
         std.log.info("blinky {}", .{cnt});
         cnt += 1; // will panic after 255 blinks
     }
+}
+
+fn paint_gauge(display: *SSD1306, level: u7) !void {
+    framebuffer.clear(.black);
+
+    framebuffer.set_pixel(level, 31, .white);
+    framebuffer.set_pixel(level, 32, .white);
+
+    std.log.info("begin render", .{});
+    try display.write_full_display(framebuffer.bit_stream());
+    std.log.info("end render", .{});
 }
