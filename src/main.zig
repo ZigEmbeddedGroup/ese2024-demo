@@ -86,7 +86,10 @@ const I2C_Device = struct {
     }
 };
 
-const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(I2C_Device);
+const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(I2C_Device, .{
+    .i2c_prefix = true,
+    .buffer_size = 256,
+});
 
 const RotaryEncoder = drivers.input.rotary_encoder.RotaryEncoder_Generic(Digital_IO);
 const DebouncedButton = drivers.input.debounced_button.DebouncedButton_Generic(Digital_IO, .low, null);
@@ -94,7 +97,7 @@ const DebouncedButton = drivers.input.debounced_button.DebouncedButton_Generic(D
 /// The splash bitmap we show before pressing the first button:
 const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
 
-var framebuffer = drivers.display.ssd1306.Framebuffer.init_black();
+var framebuffer = drivers.display.ssd1306.Framebuffer.init(.black);
 
 pub fn main() !void {
     const pins = pin_config.apply();
@@ -120,6 +123,7 @@ pub fn main() !void {
 
     try i2c.apply(.{
         .clock_config = rp2040.clock_config,
+        .baud_rate = 400_000,
     });
 
     std.log.info("set up rotary encoder...", .{});

@@ -1,6 +1,6 @@
 # builds the sources
 build:
-    zig build -freference-trace --prominent-compile-errors -Doptimize=ReleaseSmall
+    zig build -freference-trace --prominent-compile-errors
 
 # creates a disassembly of the project
 disasm: build
@@ -11,7 +11,7 @@ load: build
     picotool load -uvx zig-out/firmware/ese24-demo.uf2
 
 # flashes the application via openocd
-flash: build 
+flash: build
     openocd -f interface/cmsis-dap.cfg -c "adapter_khz 6000" -f target/rp2040.cfg -c "program zig-out/firmware/ese24-demo.elf reset exit"
 
 # starts openocd server to listen for gdb connection
