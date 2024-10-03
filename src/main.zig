@@ -3,6 +3,8 @@ const microzig = @import("microzig");
 const drivers = @import("drivers");
 const z2d = @import("z2d");
 
+const Framebuffer = drivers.display.ssd1306.Framebuffer;
+
 const rp2040 = microzig.hal;
 const time = rp2040.time;
 const gpio = rp2040.gpio;
@@ -98,7 +100,8 @@ const DebouncedButton = drivers.input.debounced_button.DebouncedButton_Generic(D
 /// The splash bitmap we show before pressing the first button:
 const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
 
-var framebuffer = drivers.display.ssd1306.Framebuffer.init(.black);
+var static_framebuffer = Framebuffer.init(.black);
+var dynamic_framebuffer = Framebuffer.init(.black);
 
 pub fn main() !void {
     const pins = pin_config.apply();
@@ -147,14 +150,14 @@ pub fn main() !void {
 
     try display.write_full_display(splash_bitmap_data);
 
+    try render_content(&static_framebuffer, StaticGraphic{});
+
     std.log.info("wait for button press...", .{});
 
     // wait for user to press the button:
     while (try input_button.poll() != .pressed) {
         //
     }
-
-    try display.write_full_display(framebuffer.bit_stream());
 
     // wait for user to release the button:
     while (try input_button.poll() != .released) {
@@ -165,21 +168,21 @@ pub fn main() !void {
 
     var level: u7 = 64;
 
-    try paint_gauge(&display, level);
+    try redraw_app(&display, level);
 
     while (true) {
         const rot_event = try encoder.poll();
         switch (rot_event) {
             .idle => {},
             .increment => {
-                level +|= 8;
+                level +|= 2;
                 std.log.info("encoder: increment to {}", .{level});
-                try paint_gauge(&display, level);
+                try redraw_app(&display, level);
             },
             .decrement => {
-                level -|= 8;
+                level -|= 2;
                 std.log.info("encoder: decrement to {}", .{level});
-                try paint_gauge(&display, level);
+                try redraw_app(&display, level);
             },
             .@"error" => {},
         }
@@ -190,7 +193,7 @@ pub fn main() !void {
             .pressed => {
                 level = 64;
                 std.log.info("button: reset to {}", .{level});
-                try paint_gauge(&display, level);
+                try redraw_app(&display, level);
             },
             .released => {},
         }
@@ -208,43 +211,23 @@ pub fn main() !void {
 
 var heap_memory: [128 * 1024]u8 = undefined;
 
-fn paint_gauge(display: *SSD1306, level: u7) !void {
-    var heap_allocator = std.heap.FixedBufferAllocator.init(&heap_memory);
-    errdefer std.log.err("out of memory after {} bytes", .{heap_allocator.end_index});
+fn redraw_app(display: *SSD1306, level: u7) !void {
+    try render_content(&dynamic_framebuffer, DynamicGraphic{
+        .level = level,
+    });
 
-    // var logging_allocator = std.heap.loggingAllocator(heap_allocator.allocator());
-    // const allocator = logging_allocator.allocator();
+    overlay_framebuffer(&dynamic_framebuffer, &static_framebuffer);
 
-    const allocator = heap_allocator.allocator();
+    try display.write_full_display(dynamic_framebuffer.bit_stream());
+}
 
-    const width = 128;
-    const height = 64;
-    const surface = try z2d.Surface.init(.image_surface_alpha8, allocator, width, height);
-    defer surface.deinit();
+fn overlay_framebuffer(dst: *Framebuffer, src: *const Framebuffer) void {
+    for (&dst.pixel_data, &src.pixel_data) |*d, s| {
+        d.* |= s;
+    }
+}
 
-    std.log.info("surface ready", .{});
-
-    var context: z2d.Context = .{
-        .surface = surface,
-        .pattern = .{
-            .opaque_pattern = .{
-                .pixel = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
-            },
-        },
-        .anti_aliasing_mode = .none,
-        .line_width = 1.0,
-    };
-
-    std.log.info("context ready", .{});
-
-    const float_level = @as(f32, @floatFromInt(level)) / std.math.maxInt(@TypeOf(level));
-
-    try fillMark(allocator, &context, float_level);
-
-    std.log.info("fill done", .{});
-
-    framebuffer.clear(.black);
-
+fn copy_surface_to_framebuffer(surface: *const z2d.Surface, framebuffer: *Framebuffer) void {
     for (0..64) |y| {
         for (0..128) |x| {
             const pixel = surface.image_surface_alpha8.getPixel(@intCast(x), @intCast(y)) catch unreachable;
@@ -259,74 +242,123 @@ fn paint_gauge(display: *SSD1306, level: u7) !void {
             );
         }
     }
-
-    std.log.info("begin render", .{});
-    try display.write_full_display(framebuffer.bit_stream());
-    std.log.info("end render", .{});
 }
 
-/// Generates and fills the path for the Zig mark.
-fn fillMark(alloc: std.mem.Allocator, context: *z2d.Context, float_level: f32) !void {
-    var path = z2d.Path.init(alloc);
-    defer path.deinit();
-
-    std.log.info("path ready", .{});
-
-    // Paint gauge optics:
-    // M 64 54
-    // L 96 22
-    // C 80 4 48 4 32 22
-    // Z
-
-    try path.moveTo(64, 54);
-    try path.lineTo(96, 22);
-    try path.curveTo(80, 4, 48, 4, 32, 22);
-    try path.close();
-
-    context.line_width = 2.0;
-    try context.stroke(alloc, path);
-    path.reset();
-
-    // Paint gauge meter:
-    // virtual arc:
-    //  M 109 54
-    //  a 1 1 0 0 0 -90 0 # means radius = 45
-
+const graphic = struct {
     const ang_base = -40 * std.math.rad_per_deg;
     const ang_range = 80 * std.math.rad_per_deg;
     const radius_digit = 35;
     const radius_mark_in = 38;
     const radius_mark_out = 45;
+};
 
-    for (0..10) |tick| {
-        const perc: f32 = @as(f32, @floatFromInt(tick)) / 9;
+fn render_content(framebuffer: *Framebuffer, renderer: anytype) !void {
+    var heap_allocator = std.heap.FixedBufferAllocator.init(&heap_memory);
+    errdefer std.log.err("out of memory after {} bytes", .{heap_allocator.end_index});
 
-        const ang = ang_base + perc * ang_range;
+    // var logging_allocator = std.heap.loggingAllocator(heap_allocator.allocator());
+    // const allocator = logging_allocator.allocator();
 
-        const dx = @sin(ang);
-        const dy = @cos(ang);
+    const allocator = heap_allocator.allocator();
 
-        try path.lineTo(64 + radius_mark_in * dx, 54 - radius_mark_in * dy);
-        try path.lineTo(64 + radius_mark_out * dx, 54 - radius_mark_out * dy);
+    const surface = try z2d.Surface.init(
+        .image_surface_alpha8,
+        allocator,
+        Framebuffer.width,
+        Framebuffer.height,
+    );
+    defer surface.deinit();
 
-        context.line_width = 1.5;
-        try context.stroke(alloc, path);
-        path.reset();
+    // std.log.info("surface ready", .{});
+
+    var context: z2d.Context = .{
+        .surface = surface,
+        .pattern = .{
+            .opaque_pattern = .{
+                .pixel = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
+            },
+        },
+        .anti_aliasing_mode = .none,
+        .line_width = 1.0,
+    };
+
+    // std.log.info("context ready", .{});
+
+    try renderer.draw(allocator, &context);
+
+    // std.log.info("fill done", .{});
+
+    copy_surface_to_framebuffer(&surface, framebuffer);
+}
+
+const DynamicGraphic = struct {
+    level: u7,
+
+    pub fn draw(self: DynamicGraphic, alloc: std.mem.Allocator, context: *z2d.Context) !void {
+        const float_level = @as(f32, @floatFromInt(self.level)) / std.math.maxInt(@TypeOf(self.level));
+
+        var path = z2d.Path.init(alloc);
+        defer path.deinit();
+
+        {
+            const ang = graphic.ang_base + float_level * graphic.ang_range;
+
+            const dx = graphic.radius_digit * @sin(ang);
+            const dy = graphic.radius_digit * @cos(ang);
+
+            try path.moveTo(64, 54);
+            try path.lineTo(64 + dx, 54 - dy);
+
+            context.line_width = 1.0;
+            try context.stroke(alloc, path);
+            path.reset();
+        }
+
+        // std.log.info("graphic filled", .{});
     }
+};
 
-    {
-        const ang = ang_base + float_level * ang_range;
+const StaticGraphic = struct {
+    pub fn draw(self: StaticGraphic, alloc: std.mem.Allocator, context: *z2d.Context) !void {
+        _ = self;
 
-        const dx = radius_digit * @sin(ang);
-        const dy = radius_digit * @cos(ang);
+        var path = z2d.Path.init(alloc);
+        defer path.deinit();
+
+        // Paint gauge optics:
+        // M 64 54
+        // L 96 22
+        // C 80 4 48 4 32 22
+        // Z
 
         try path.moveTo(64, 54);
-        try path.lineTo(64 + dx, 54 - dy);
+        try path.lineTo(96, 22);
+        try path.curveTo(80, 4, 48, 4, 32, 22);
+        try path.close();
 
-        context.line_width = 1.0;
+        context.line_width = 2.0;
         try context.stroke(alloc, path);
         path.reset();
-    }
 
-    std.log.info("graphic filled", .{});
-}
+        // Paint gauge meter:
+        // virtual arc:
+        //  M 109 54
+        //  a 1 1 0 0 0 -90 0 # means radius = 45
+
+        for (0..10) |tick| {
+            const perc: f32 = @as(f32, @floatFromInt(tick)) / 9;
+
+            const ang = graphic.ang_base + perc * graphic.ang_range;
+
+            const dx = @sin(ang);
+            const dy = @cos(ang);
+
+            try path.lineTo(64 + graphic.radius_mark_in * dx, 54 - graphic.radius_mark_in * dy);
+            try path.lineTo(64 + graphic.radius_mark_out * dx, 54 - graphic.radius_mark_out * dy);
+
+            context.line_width = 1.5;
+            try context.stroke(alloc, path);
+            path.reset();
+        }
+    }
+};
