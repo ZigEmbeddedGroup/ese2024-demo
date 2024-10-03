@@ -7,8 +7,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const mdf_dep = b.dependency("mdf", .{});
+    const z2d_dep = b.dependency("z2d", .{});
 
     const mdf_mod = mdf_dep.module("drivers");
+    const z2d_mod = z2d_dep.module("z2d");
 
     const convert_bitmap_tool = b.addExecutable(.{
         .name = "convert-bitmap",
@@ -33,6 +35,7 @@ pub fn build(b: *std.Build) void {
     });
     firmware.add_app_import("drivers", mdf_mod, .{});
     firmware.add_app_import("ese-splash.raw", raw_bitmap_mod, .{});
+    firmware.add_app_import("z2d", z2d_mod, .{});
 
     mz.install_firmware(b, firmware, .{});
 

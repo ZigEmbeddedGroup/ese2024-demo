@@ -1,6 +1,7 @@
 const std = @import("std");
 const microzig = @import("microzig");
 const drivers = @import("drivers");
+const z2d = @import("z2d");
 
 const rp2040 = microzig.hal;
 const time = rp2040.time;
@@ -171,12 +172,12 @@ pub fn main() !void {
         switch (rot_event) {
             .idle => {},
             .increment => {
-                level +|= 1;
+                level +|= 8;
                 std.log.info("encoder: increment to {}", .{level});
                 try paint_gauge(&display, level);
             },
             .decrement => {
-                level -|= 1;
+                level -|= 8;
                 std.log.info("encoder: decrement to {}", .{level});
                 try paint_gauge(&display, level);
             },
@@ -205,13 +206,127 @@ pub fn main() !void {
     }
 }
 
+var heap_memory: [128 * 1024]u8 = undefined;
+
 fn paint_gauge(display: *SSD1306, level: u7) !void {
+    var heap_allocator = std.heap.FixedBufferAllocator.init(&heap_memory);
+    errdefer std.log.err("out of memory after {} bytes", .{heap_allocator.end_index});
+
+    // var logging_allocator = std.heap.loggingAllocator(heap_allocator.allocator());
+    // const allocator = logging_allocator.allocator();
+
+    const allocator = heap_allocator.allocator();
+
+    const width = 128;
+    const height = 64;
+    const surface = try z2d.Surface.init(.image_surface_alpha8, allocator, width, height);
+    defer surface.deinit();
+
+    std.log.info("surface ready", .{});
+
+    var context: z2d.Context = .{
+        .surface = surface,
+        .pattern = .{
+            .opaque_pattern = .{
+                .pixel = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
+            },
+        },
+        .anti_aliasing_mode = .none,
+        .line_width = 1.0,
+    };
+
+    std.log.info("context ready", .{});
+
+    const float_level = @as(f32, @floatFromInt(level)) / std.math.maxInt(@TypeOf(level));
+
+    try fillMark(allocator, &context, float_level);
+
+    std.log.info("fill done", .{});
+
     framebuffer.clear(.black);
 
-    framebuffer.set_pixel(level, 31, .white);
-    framebuffer.set_pixel(level, 32, .white);
+    for (0..64) |y| {
+        for (0..128) |x| {
+            const pixel = surface.image_surface_alpha8.getPixel(@intCast(x), @intCast(y)) catch unreachable;
+
+            framebuffer.set_pixel(
+                @intCast(x),
+                @intCast(y),
+                if (pixel.alpha8.a > 0x80)
+                    .white
+                else
+                    .black,
+            );
+        }
+    }
 
     std.log.info("begin render", .{});
     try display.write_full_display(framebuffer.bit_stream());
     std.log.info("end render", .{});
+}
+
+/// Generates and fills the path for the Zig mark.
+fn fillMark(alloc: std.mem.Allocator, context: *z2d.Context, float_level: f32) !void {
+    var path = z2d.Path.init(alloc);
+    defer path.deinit();
+
+    std.log.info("path ready", .{});
+
+    // Paint gauge optics:
+    // M 64 54
+    // L 96 22
+    // C 80 4 48 4 32 22
+    // Z
+
+    try path.moveTo(64, 54);
+    try path.lineTo(96, 22);
+    try path.curveTo(80, 4, 48, 4, 32, 22);
+    try path.close();
+
+    context.line_width = 2.0;
+    try context.stroke(alloc, path);
+    path.reset();
+
+    // Paint gauge meter:
+    // virtual arc:
+    //  M 109 54
+    //  a 1 1 0 0 0 -90 0 # means radius = 45
+
+    const ang_base = -40 * std.math.rad_per_deg;
+    const ang_range = 80 * std.math.rad_per_deg;
+    const radius_digit = 35;
+    const radius_mark_in = 38;
+    const radius_mark_out = 45;
+
+    for (0..10) |tick| {
+        const perc: f32 = @as(f32, @floatFromInt(tick)) / 9;
+
+        const ang = ang_base + perc * ang_range;
+
+        const dx = @sin(ang);
+        const dy = @cos(ang);
+
+        try path.lineTo(64 + radius_mark_in * dx, 54 - radius_mark_in * dy);
+        try path.lineTo(64 + radius_mark_out * dx, 54 - radius_mark_out * dy);
+
+        context.line_width = 1.5;
+        try context.stroke(alloc, path);
+        path.reset();
+    }
+
+    {
+        const ang = ang_base + float_level * ang_range;
+
+        const dx = radius_digit * @sin(ang);
+        const dy = radius_digit * @cos(ang);
+
+        try path.moveTo(64, 54);
+        try path.lineTo(64 + dx, 54 - dy);
+
+        context.line_width = 1.0;
+        try context.stroke(alloc, path);
+        path.reset();
+    }
+
+    std.log.info("graphic filled", .{});
 }

@@ -1,6 +1,6 @@
 # builds the sources
 build:
-    zig build -freference-trace --prominent-compile-errors
+    zig build -freference-trace --prominent-compile-errors -Doptimize=ReleaseSmall
 
 # creates a disassembly of the project
 disasm: build
