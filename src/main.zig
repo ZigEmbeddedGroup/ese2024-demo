@@ -1,10 +1,10 @@
 const std = @import("std");
 const microzig = @import("microzig");
-const drivers = @import("drivers");
 const z2d = @import("z2d");
 
 const Framebuffer = drivers.display.ssd1306.Framebuffer;
 
+const drivers = microzig.drivers;
 const rp2040 = microzig.hal;
 const time = rp2040.time;
 const gpio = rp2040.gpio;
@@ -26,13 +26,6 @@ const enc_button = gpio.num(18);
 const enc_a = gpio.num(19);
 const enc_b = gpio.num(20);
 
-const pin_config = rp2040.pins.GlobalConfiguration{
-    .GPIO25 = .{
-        .name = "led",
-        .direction = .out,
-    },
-};
-
 pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     std.log.err("panic: {s}", .{message});
     @breakpoint();
@@ -45,8 +38,8 @@ pub const microzig_options = .{
 };
 
 const Digital_IO = struct {
-    const State = drivers.base.DigitalIO.State;
-    const Direction = drivers.base.DigitalIO.Direction;
+    const State = drivers.base.Digital_IO.State;
+    const Direction = drivers.base.Digital_IO.Direction;
 
     pin: gpio.Pin,
 
@@ -89,13 +82,20 @@ const I2C_Device = struct {
     }
 };
 
-const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(I2C_Device, .{
-    .i2c_prefix = true,
+const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{
+    .mode = .i2c,
     .buffer_size = 256,
+    .Datagram_Device = I2C_Device,
 });
 
-const RotaryEncoder = drivers.input.rotary_encoder.RotaryEncoder_Generic(Digital_IO);
-const DebouncedButton = drivers.input.debounced_button.DebouncedButton_Generic(Digital_IO, .low, null);
+const RotaryEncoder = drivers.input.Rotary_Encoder(.{
+    .Digital_IO = Digital_IO,
+});
+
+const DebouncedButton = drivers.input.Debounced_Button(.{
+    .active_state = .low,
+    .Digital_IO = Digital_IO,
+});
 
 /// The splash bitmap we show before pressing the first button:
 const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
@@ -104,8 +104,6 @@ var static_framebuffer = Framebuffer.init(.black);
 var dynamic_framebuffer = Framebuffer.init(.black);
 
 pub fn main() !void {
-    const pins = pin_config.apply();
-
     uart_tx_pin.set_function(.uart);
     uart_rx_pin.set_function(.uart);
 
@@ -197,15 +195,6 @@ pub fn main() !void {
             },
             .released => {},
         }
-    }
-
-    var cnt: u8 = 0;
-
-    while (true) {
-        pins.led.toggle();
-        time.sleep_ms(100);
-        std.log.info("blinky {}", .{cnt});
-        cnt += 1; // will panic after 255 blinks
     }
 }
 
