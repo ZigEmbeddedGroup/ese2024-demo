@@ -6,32 +6,49 @@ const Framebuffer = drivers.display.ssd1306.Framebuffer;
 
 const drivers = microzig.drivers;
 const rp2040 = microzig.hal;
-const time = rp2040.time;
-const gpio = rp2040.gpio;
 
-const led = gpio.num(25);
+// Hardware allocation:
 
 const uart = rp2040.uart.instance.num(0);
 const i2c = rp2040.i2c.instance.num(0);
 const spi = rp2040.spi.instance.num(0);
 
+const led = rp2040.gpio.num(25);
+
 const baud_rate = 115200;
 
-const uart_tx_pin = gpio.num(0);
-const uart_rx_pin = gpio.num(1);
+const uart_tx_pin = rp2040.gpio.num(0);
+const uart_rx_pin = rp2040.gpio.num(1);
 
-const i2c_scl_pin = gpio.num(17);
-const i2c_sda_pin = gpio.num(16);
+const i2c_scl_pin = rp2040.gpio.num(17);
+const i2c_sda_pin = rp2040.gpio.num(16);
 
-const enc_button = gpio.num(18);
-const enc_a = gpio.num(19);
-const enc_b = gpio.num(20);
+const mode_switch_pin = rp2040.gpio.num(15);
 
-const spi_sck_pin = gpio.num(2);
-const spi_tx_pin = gpio.num(3);
+const enc_button = rp2040.gpio.num(18);
+const enc_a = rp2040.gpio.num(19);
+const enc_b = rp2040.gpio.num(20);
+
+const spi_sck_pin = rp2040.gpio.num(2);
+const spi_tx_pin = rp2040.gpio.num(3);
 // const spi_rx_pin = gpio.num(4);
-const spi_cs_pin = gpio.num(5);
-const spi_dc_pin = gpio.num(6);
+const spi_cs_pin = rp2040.gpio.num(5);
+const spi_dc_pin = rp2040.gpio.num(6);
+
+// Driver configuration:
+
+const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{ .mode = .dynamic });
+
+const RotaryEncoder = drivers.input.Rotary_Encoder(.{
+    .Digital_IO = rp2040.drivers.GPIO_Device,
+});
+
+const DebouncedButton = drivers.input.Debounced_Button(.{
+    .active_state = .low,
+    .Digital_IO = rp2040.drivers.GPIO_Device,
+});
+
+// MicroZig configuration:
 
 pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     std.log.err("panic: {s}", .{message});
@@ -43,88 +60,6 @@ pub const microzig_options = .{
     .log_level = .debug,
     .logFn = rp2040.uart.logFn,
 };
-
-const Digital_IO = struct {
-    const State = drivers.base.Digital_IO.State;
-    const Direction = drivers.base.Digital_IO.Direction;
-
-    pin: gpio.Pin,
-
-    pub fn set_direction(dio: Digital_IO, dir: Direction) !void {
-        dio.pin.set_direction(switch (dir) {
-            .output => .out,
-            .input => .in,
-        });
-    }
-
-    pub fn set_bias(dio: Digital_IO, maybe_bias: ?State) !void {
-        dio.pin.set_pull(if (maybe_bias) |bias| switch (bias) {
-            .low => .down,
-            .high => .up,
-        } else .disabled);
-    }
-
-    pub fn write(dio: Digital_IO, state: State) !void {
-        dio.pin.put(state.value());
-    }
-
-    pub fn read(dio: Digital_IO) !State {
-        return @enumFromInt(dio.pin.read());
-    }
-};
-
-const I2C_Device = struct {
-    address: rp2040.i2c.Address,
-
-    pub fn connect(dd: I2C_Device) !void {
-        _ = dd;
-    }
-
-    pub fn disconnect(dd: I2C_Device) void {
-        _ = dd;
-    }
-
-    pub fn writev(dd: I2C_Device, datagrams: []const []const u8) !void {
-        try i2c.writev_blocking(dd.address, datagrams, null);
-    }
-};
-
-const SPI_Device = struct {
-    chipsel: rp2040.gpio.Pin,
-
-    pub fn connect(dd: SPI_Device) !void {
-        dd.chipsel.put(0);
-    }
-
-    pub fn disconnect(dd: SPI_Device) void {
-        dd.chipsel.put(1);
-    }
-
-    pub fn writev(dd: SPI_Device, datagrams: []const []const u8) !void {
-        _ = dd;
-        spi.writev_blocking(u8, datagrams);
-    }
-};
-
-// const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{
-//     .mode = .i2c,
-//     .Datagram_Device = I2C_Device,
-// });
-
-const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{
-    .mode = .spi_4wire,
-    .Datagram_Device = SPI_Device,
-    .Digital_IO = Digital_IO,
-});
-
-const RotaryEncoder = drivers.input.Rotary_Encoder(.{
-    .Digital_IO = Digital_IO,
-});
-
-const DebouncedButton = drivers.input.Debounced_Button(.{
-    .active_state = .low,
-    .Digital_IO = Digital_IO,
-});
 
 /// The splash bitmap we show before pressing the first button:
 const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
@@ -147,6 +82,10 @@ pub fn main() !void {
     spi_tx_pin.set_function(.spi);
     spi_cs_pin.set_function(.sio);
     spi_dc_pin.set_function(.sio);
+
+    mode_switch_pin.set_function(.sio);
+    mode_switch_pin.set_direction(.in);
+    mode_switch_pin.set_pull(.up);
 
     uart.apply(.{
         .baud_rate = baud_rate,
@@ -175,13 +114,13 @@ pub fn main() !void {
 
     std.log.info("set up rotary encoder...", .{});
 
-    var input_button = try DebouncedButton.init(Digital_IO{
+    var input_button = try DebouncedButton.init(rp2040.drivers.GPIO_Device{
         .pin = enc_button,
     });
 
     var encoder = try RotaryEncoder.init(
-        Digital_IO{ .pin = enc_a },
-        Digital_IO{ .pin = enc_b },
+        rp2040.drivers.GPIO_Device{ .pin = enc_a },
+        rp2040.drivers.GPIO_Device{ .pin = enc_b },
         .high,
     );
 
@@ -190,14 +129,30 @@ pub fn main() !void {
     spi_cs_pin.set_direction(.out);
     spi_cs_pin.put(1);
 
-    var display = try SSD1306.init(
-        SPI_Device{ .chipsel = spi_cs_pin },
-        Digital_IO{ .pin = spi_dc_pin },
-    );
+    var i2c_dev = rp2040.drivers.I2C_Device{
+        .bus = i2c,
+        .address = rp2040.i2c.Address.new(0b011_1100),
+    };
 
-    // var display = try SSD1306.init(I2C_Device{
-    //     .address = rp2040.i2c.Address.new(0b011_1100),
-    // });
+    var spi_dev = rp2040.drivers.SPI_Device.init(spi, spi_cs_pin, .{});
+    var spi_dc = rp2040.drivers.GPIO_Device.init(spi_dc_pin);
+
+    // Give the I/O pin some time to settle its state after enabling pull-up:
+    rp2040.time.sleep_ms(5);
+
+    // We can use an external button to switch between an I²C or SPI display:
+    const mode_select = mode_switch_pin.read();
+    var display = switch (mode_select) {
+        0 => try SSD1306.init(.{
+            .spi_4wire = .{
+                .device = spi_dev.datagram_device(),
+                .dc_pin = spi_dc.digital_io(),
+            },
+        }),
+        1 => try SSD1306.init(.{
+            .i2c = .{ .device = i2c_dev.datagram_device() },
+        }),
+    };
 
     try display.write_full_display(splash_bitmap_data);
 
