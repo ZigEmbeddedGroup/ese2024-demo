@@ -1,6 +1,6 @@
 # builds the sources
 build:
-    zig build -freference-trace --prominent-compile-errors -Doptimize=ReleaseSmall
+    zig build -freference-trace --prominent-compile-errors # -Doptimize=ReleaseSmall
 
 # creates a disassembly of the project
 disasm: build
@@ -12,11 +12,11 @@ load: build
 
 # flashes the application via openocd
 flash: build
-    openocd -f interface/cmsis-dap.cfg -c "adapter_khz 6000" -f target/rp2040.cfg -c "program zig-out/firmware/ese24-demo.elf reset exit"
+    openocd -f tools/openocd.cfg -c "program zig-out/firmware/ese24-demo.elf reset exit"
 
 # starts openocd server to listen for gdb connection
 ocd:
-    openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -s tcl
+    openocd -f tools/openocd.cfg -s tcl
 
 # starts gdb. requires "ocd" before
 gdb:

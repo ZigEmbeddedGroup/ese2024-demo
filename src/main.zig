@@ -13,6 +13,7 @@ const led = gpio.num(25);
 
 const uart = rp2040.uart.instance.num(0);
 const i2c = rp2040.i2c.instance.num(0);
+const spi = rp2040.spi.instance.num(0);
 
 const baud_rate = 115200;
 
@@ -25,6 +26,12 @@ const i2c_sda_pin = gpio.num(16);
 const enc_button = gpio.num(18);
 const enc_a = gpio.num(19);
 const enc_b = gpio.num(20);
+
+const spi_sck_pin = gpio.num(2);
+const spi_tx_pin = gpio.num(3);
+// const spi_rx_pin = gpio.num(4);
+const spi_cs_pin = gpio.num(5);
+const spi_dc_pin = gpio.num(6);
 
 pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     std.log.err("panic: {s}", .{message});
@@ -77,15 +84,37 @@ const I2C_Device = struct {
         _ = dd;
     }
 
-    pub fn write(dd: I2C_Device, data: []const u8) !void {
-        try i2c.write_blocking(dd.address, data, null);
+    pub fn writev(dd: I2C_Device, datagrams: []const []const u8) !void {
+        try i2c.writev_blocking(dd.address, datagrams, null);
     }
 };
 
+const SPI_Device = struct {
+    chipsel: rp2040.gpio.Pin,
+
+    pub fn connect(dd: SPI_Device) !void {
+        dd.chipsel.put(0);
+    }
+
+    pub fn disconnect(dd: SPI_Device) void {
+        dd.chipsel.put(1);
+    }
+
+    pub fn writev(dd: SPI_Device, datagrams: []const []const u8) !void {
+        _ = dd;
+        spi.writev_blocking(u8, datagrams);
+    }
+};
+
+// const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{
+//     .mode = .i2c,
+//     .Datagram_Device = I2C_Device,
+// });
+
 const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{
-    .mode = .i2c,
-    .buffer_size = 256,
-    .Datagram_Device = I2C_Device,
+    .mode = .spi_4wire,
+    .Datagram_Device = SPI_Device,
+    .Digital_IO = Digital_IO,
 });
 
 const RotaryEncoder = drivers.input.Rotary_Encoder(.{
@@ -114,6 +143,11 @@ pub fn main() !void {
     enc_a.set_function(.sio);
     enc_b.set_function(.sio);
 
+    spi_sck_pin.set_function(.spi);
+    spi_tx_pin.set_function(.spi);
+    spi_cs_pin.set_function(.sio);
+    spi_dc_pin.set_function(.sio);
+
     uart.apply(.{
         .baud_rate = baud_rate,
         .clock_config = rp2040.clock_config,
@@ -126,6 +160,17 @@ pub fn main() !void {
     try i2c.apply(.{
         .clock_config = rp2040.clock_config,
         .baud_rate = 400_000,
+    });
+
+    try spi.apply(.{
+        .clock_config = rp2040.clock_config,
+        .baud_rate = 1_000_000,
+        .frame_format = .{
+            .motorola = .{
+                .clock_polarity = .default_high,
+                .clock_phase = .second_edge,
+            },
+        },
     });
 
     std.log.info("set up rotary encoder...", .{});
@@ -142,20 +187,23 @@ pub fn main() !void {
 
     std.log.info("set up display...", .{});
 
-    var display = try SSD1306.init(I2C_Device{
-        .address = rp2040.i2c.Address.new(0b011_1100),
-    });
+    spi_cs_pin.set_direction(.out);
+    spi_cs_pin.put(1);
+
+    var display = try SSD1306.init(
+        SPI_Device{ .chipsel = spi_cs_pin },
+        Digital_IO{ .pin = spi_dc_pin },
+    );
+
+    // var display = try SSD1306.init(I2C_Device{
+    //     .address = rp2040.i2c.Address.new(0b011_1100),
+    // });
 
     try display.write_full_display(splash_bitmap_data);
 
     try render_content(&static_framebuffer, StaticGraphic{});
 
     std.log.info("wait for button press...", .{});
-
-    // wait for user to press the button:
-    while (try input_button.poll() != .pressed) {
-        //
-    }
 
     // wait for user to release the button:
     while (try input_button.poll() != .released) {
