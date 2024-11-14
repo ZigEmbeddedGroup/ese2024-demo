@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
         .name = "ese24-demo",
         .target = rp2040.boards.raspberrypi.pico,
         .optimize = optimize,
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/application.zig"),
     });
     firmware.add_app_import("ese-splash.raw", raw_bitmap_mod, .{});
     firmware.add_app_import("z2d", z2d_mod, .{});
