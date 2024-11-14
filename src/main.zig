@@ -1,55 +1,14 @@
+// Module imports:
 const std = @import("std");
 const microzig = @import("microzig");
-const z2d = @import("z2d");
 
-const Framebuffer = drivers.display.ssd1306.Framebuffer;
-
-const drivers = microzig.drivers;
-const rp2040 = microzig.hal;
-
-// Hardware allocation:
-
-const uart = rp2040.uart.instance.num(0);
-const i2c = rp2040.i2c.instance.num(0);
-const spi = rp2040.spi.instance.num(0);
-
-const led = rp2040.gpio.num(25);
-
-const baud_rate = 115200;
-
-const uart_tx_pin = rp2040.gpio.num(0);
-const uart_rx_pin = rp2040.gpio.num(1);
-
-const i2c_scl_pin = rp2040.gpio.num(17);
-const i2c_sda_pin = rp2040.gpio.num(16);
-
-const mode_switch_pin = rp2040.gpio.num(15);
-
-const enc_button = rp2040.gpio.num(18);
-const enc_a = rp2040.gpio.num(19);
-const enc_b = rp2040.gpio.num(20);
-
-const spi_sck_pin = rp2040.gpio.num(2);
-const spi_tx_pin = rp2040.gpio.num(3);
-// const spi_rx_pin = gpio.num(4);
-const spi_cs_pin = rp2040.gpio.num(5);
-const spi_dc_pin = rp2040.gpio.num(6);
-
-// Driver configuration:
-
-const SSD1306 = drivers.display.ssd1306.SSD1306_Generic(.{ .mode = .dynamic });
-
-const RotaryEncoder = drivers.input.Rotary_Encoder(.{
-    .Digital_IO = rp2040.drivers.GPIO_Device,
-});
-
-const DebouncedButton = drivers.input.Debounced_Button(.{
-    .active_state = .low,
-    .Digital_IO = rp2040.drivers.GPIO_Device,
-});
+// Other files of the project:
+const hw = @import("hardware.zig");
+const dri = @import("drivers.zig");
+const display = @import("display.zig");
+const graphics = @import("graphics.zig");
 
 // MicroZig configuration:
-
 pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     std.log.err("panic: {s}", .{message});
     @breakpoint();
@@ -58,299 +17,77 @@ pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noretu
 
 pub const microzig_options = .{
     .log_level = .debug,
-    .logFn = rp2040.uart.logFn,
+    .logFn = microzig.hal.uart.logFn,
 };
 
-/// The splash bitmap we show before pressing the first button:
-const splash_bitmap_data: *const [8 * 128]u8 = @embedFile("ese-splash.raw");
+// Application:
 
-var static_framebuffer = Framebuffer.init(.black);
-var dynamic_framebuffer = Framebuffer.init(.black);
+const max_display_refresh_period_us = 50 * std.time.us_per_ms; // 20 Hz
 
 pub fn main() !void {
-    uart_tx_pin.set_function(.uart);
-    uart_rx_pin.set_function(.uart);
-
-    i2c_scl_pin.set_function(.i2c);
-    i2c_sda_pin.set_function(.i2c);
-
-    enc_button.set_function(.sio);
-    enc_a.set_function(.sio);
-    enc_b.set_function(.sio);
-
-    spi_sck_pin.set_function(.spi);
-    spi_tx_pin.set_function(.spi);
-    spi_cs_pin.set_function(.sio);
-    spi_dc_pin.set_function(.sio);
-
-    mode_switch_pin.set_function(.sio);
-    mode_switch_pin.set_direction(.in);
-    mode_switch_pin.set_pull(.up);
-
-    uart.apply(.{
-        .baud_rate = baud_rate,
-        .clock_config = rp2040.clock_config,
-    });
-
-    rp2040.uart.init_logger(uart);
-
-    std.log.info("set up i2c...", .{});
-
-    try i2c.apply(.{
-        .clock_config = rp2040.clock_config,
-        .baud_rate = 400_000,
-    });
-
-    try spi.apply(.{
-        .clock_config = rp2040.clock_config,
-        .baud_rate = 1_000_000,
-        .frame_format = .{
-            .motorola = .{
-                .clock_polarity = .default_high,
-                .clock_phase = .second_edge,
-            },
-        },
-    });
-
-    std.log.info("set up rotary encoder...", .{});
-
-    var input_button = try DebouncedButton.init(rp2040.drivers.GPIO_Device{
-        .pin = enc_button,
-    });
-
-    var encoder = try RotaryEncoder.init(
-        rp2040.drivers.GPIO_Device{ .pin = enc_a },
-        rp2040.drivers.GPIO_Device{ .pin = enc_b },
-        .high,
+    errdefer |err| std.log.err(
+        "application crashed: {s}",
+        .{@errorName(err)},
     );
 
-    std.log.info("set up display...", .{});
+    try hw.setup();
 
-    spi_cs_pin.set_direction(.out);
-    spi_cs_pin.put(1);
+    try dri.setup();
 
-    var i2c_dev = rp2040.drivers.I2C_Device{
-        .bus = i2c,
-        .address = rp2040.i2c.Address.new(0b011_1100),
-    };
+    // Before we initialize the display, let's render the splash screen,
+    // so we hide the render time:
+    try display.show_splash_screen();
 
-    var spi_dev = rp2040.drivers.SPI_Device.init(spi, spi_cs_pin, .{});
-    var spi_dc = rp2040.drivers.GPIO_Device.init(spi_dc_pin);
-
-    // Give the I/O pin some time to settle its state after enabling pull-up:
-    rp2040.time.sleep_ms(5);
-
-    // We can use an external button to switch between an I²C or SPI display:
-    const mode_select = mode_switch_pin.read();
-    var display = switch (mode_select) {
-        0 => try SSD1306.init(.{
-            .spi_4wire = .{
-                .device = spi_dev.datagram_device(),
-                .dc_pin = spi_dc.digital_io(),
-            },
-        }),
-        1 => try SSD1306.init(.{
-            .i2c = .{ .device = i2c_dev.datagram_device() },
-        }),
-    };
-
-    try display.write_full_display(splash_bitmap_data);
-
-    try render_content(&static_framebuffer, StaticGraphic{});
+    try graphics.prerender_graphics();
 
     std.log.info("wait for button press...", .{});
 
     // wait for user to release the button:
-    while (try input_button.poll() != .released) {
+    while (try dri.input_button.poll() != .released) {
         //
     }
 
     std.log.info("start application loop.", .{});
 
-    var level: u7 = 64;
+    var current_level: u7 = 64;
+    var displayed_level: u7 = current_level;
+    var last_update_time = microzig.hal.time.get_time_since_boot();
 
-    try redraw_app(&display, level);
+    try graphics.render_main_screen(current_level);
 
     while (true) {
-        const rot_event = try encoder.poll();
+        const rot_event = try dri.encoder.poll();
         switch (rot_event) {
             .idle => {},
             .increment => {
-                level +|= 2;
-                std.log.info("encoder: increment to {}", .{level});
-                try redraw_app(&display, level);
+                current_level +|= 1;
+                std.log.info("encoder: increment to {}", .{current_level});
             },
             .decrement => {
-                level -|= 2;
-                std.log.info("encoder: decrement to {}", .{level});
-                try redraw_app(&display, level);
+                current_level -|= 1;
+                std.log.info("encoder: decrement to {}", .{current_level});
             },
             .@"error" => {},
         }
 
-        const btn_event = try input_button.poll();
+        const btn_event = try dri.input_button.poll();
         switch (btn_event) {
             .idle => {},
             .pressed => {
-                level = 64;
-                std.log.info("button: reset to {}", .{level});
-                try redraw_app(&display, level);
+                current_level = 64;
+                std.log.info("button: reset to {}", .{current_level});
             },
             .released => {},
         }
-    }
-}
 
-var heap_memory: [128 * 1024]u8 = undefined;
+        if (displayed_level != current_level) {
+            const now = microzig.hal.time.get_time_since_boot();
 
-fn redraw_app(display: *SSD1306, level: u7) !void {
-    try render_content(&dynamic_framebuffer, DynamicGraphic{
-        .level = level,
-    });
-
-    overlay_framebuffer(&dynamic_framebuffer, &static_framebuffer);
-
-    try display.write_full_display(dynamic_framebuffer.bit_stream());
-}
-
-fn overlay_framebuffer(dst: *Framebuffer, src: *const Framebuffer) void {
-    for (&dst.pixel_data, &src.pixel_data) |*d, s| {
-        d.* |= s;
-    }
-}
-
-fn copy_surface_to_framebuffer(surface: *const z2d.Surface, framebuffer: *Framebuffer) void {
-    for (0..64) |y| {
-        for (0..128) |x| {
-            const pixel = surface.image_surface_alpha8.getPixel(@intCast(x), @intCast(y)) catch unreachable;
-
-            framebuffer.set_pixel(
-                @intCast(x),
-                @intCast(y),
-                if (pixel.alpha8.a > 0x80)
-                    .white
-                else
-                    .black,
-            );
+            if (now.diff(last_update_time).to_us() >= max_display_refresh_period_us) {
+                try graphics.render_main_screen(current_level);
+                displayed_level = current_level;
+                last_update_time = now;
+            }
         }
     }
 }
-
-const graphic = struct {
-    const ang_base = -40 * std.math.rad_per_deg;
-    const ang_range = 80 * std.math.rad_per_deg;
-    const radius_digit = 35;
-    const radius_mark_in = 38;
-    const radius_mark_out = 45;
-};
-
-fn render_content(framebuffer: *Framebuffer, renderer: anytype) !void {
-    var heap_allocator = std.heap.FixedBufferAllocator.init(&heap_memory);
-    errdefer std.log.err("out of memory after {} bytes", .{heap_allocator.end_index});
-
-    // var logging_allocator = std.heap.loggingAllocator(heap_allocator.allocator());
-    // const allocator = logging_allocator.allocator();
-
-    const allocator = heap_allocator.allocator();
-
-    const surface = try z2d.Surface.init(
-        .image_surface_alpha8,
-        allocator,
-        Framebuffer.width,
-        Framebuffer.height,
-    );
-    defer surface.deinit();
-
-    // std.log.info("surface ready", .{});
-
-    var context: z2d.Context = .{
-        .surface = surface,
-        .pattern = .{
-            .opaque_pattern = .{
-                .pixel = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
-            },
-        },
-        .anti_aliasing_mode = .none,
-        .line_width = 1.0,
-    };
-
-    // std.log.info("context ready", .{});
-
-    try renderer.draw(allocator, &context);
-
-    // std.log.info("fill done", .{});
-
-    copy_surface_to_framebuffer(&surface, framebuffer);
-}
-
-const DynamicGraphic = struct {
-    level: u7,
-
-    pub fn draw(self: DynamicGraphic, alloc: std.mem.Allocator, context: *z2d.Context) !void {
-        const float_level = @as(f32, @floatFromInt(self.level)) / std.math.maxInt(@TypeOf(self.level));
-
-        var path = z2d.Path.init(alloc);
-        defer path.deinit();
-
-        {
-            const ang = graphic.ang_base + float_level * graphic.ang_range;
-
-            const dx = graphic.radius_digit * @sin(ang);
-            const dy = graphic.radius_digit * @cos(ang);
-
-            try path.moveTo(64, 54);
-            try path.lineTo(64 + dx, 54 - dy);
-
-            context.line_width = 1.0;
-            try context.stroke(alloc, path);
-            path.reset();
-        }
-
-        // std.log.info("graphic filled", .{});
-    }
-};
-
-const StaticGraphic = struct {
-    pub fn draw(self: StaticGraphic, alloc: std.mem.Allocator, context: *z2d.Context) !void {
-        _ = self;
-
-        var path = z2d.Path.init(alloc);
-        defer path.deinit();
-
-        // Paint gauge optics:
-        // M 64 54
-        // L 96 22
-        // C 80 4 48 4 32 22
-        // Z
-
-        try path.moveTo(64, 54);
-        try path.lineTo(96, 22);
-        try path.curveTo(80, 4, 48, 4, 32, 22);
-        try path.close();
-
-        context.line_width = 2.0;
-        try context.stroke(alloc, path);
-        path.reset();
-
-        // Paint gauge meter:
-        // virtual arc:
-        //  M 109 54
-        //  a 1 1 0 0 0 -90 0 # means radius = 45
-
-        for (0..10) |tick| {
-            const perc: f32 = @as(f32, @floatFromInt(tick)) / 9;
-
-            const ang = graphic.ang_base + perc * graphic.ang_range;
-
-            const dx = @sin(ang);
-            const dy = @cos(ang);
-
-            try path.lineTo(64 + graphic.radius_mark_in * dx, 54 - graphic.radius_mark_in * dy);
-            try path.lineTo(64 + graphic.radius_mark_out * dx, 54 - graphic.radius_mark_out * dy);
-
-            context.line_width = 1.5;
-            try context.stroke(alloc, path);
-            path.reset();
-        }
-    }
-};
